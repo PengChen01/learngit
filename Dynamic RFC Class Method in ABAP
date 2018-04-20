@@ -1,0 +1,110 @@
+*&---------------------------------------------------------------------*
+*& Report Z14143_13
+*&---------------------------------------------------------------------*
+*&
+*&---------------------------------------------------------------------*
+REPORT ztest_k07.
+TYPES BEGIN OF transtru.
+TYPES datatype TYPE char36.
+TYPES dataname TYPE char36.
+TYPES datavalue TYPE char36.
+TYPES END OF transtru.
+
+DATA BEGIN OF ls_rfcparameter.
+DATA methodname TYPE char36.
+DATA inputdata TYPE TABLE OF transtru.
+DATA outputdata TYPE TABLE OF transtru.
+DATA body TYPE  string.
+DATA END OF ls_rfcparameter.
+DATA lt_classmethod LIKE TABLE OF ls_rfcparameter.
+DATA: inputstring TYPE string,
+      outputstr   TYPE string,
+      codestr     TYPE TABLE OF string WITH HEADER LINE,
+      bodystr     TYPE TABLE OF string WITH HEADER LINE.
+DATA prog  TYPE string.
+DATA: ptab TYPE abap_parmbind_tab,
+      etab TYPE abap_excpbind_tab.
+inputstring = '{"METHODS":[{"METHODNAME":"METHOD1","INPUTDATA":[{"DATATYPE":"CHAR36","DATANAME":"METHOD1INPUT1","DATAVALUE":"1"}' &&
+',{"DATATYPE":"CHAR36","DATANAME":"METHOD1INPUT2","DATAVALUE":"2"}],"OUTPUTDATA":[{"DATATYPE":"CHAR36","DATANAME":"METHOD1OUTPUT1"}' &&
+ ',{"DATATYPE":"CHAR36","DATANAME":"METHOD1OUTPUT2"}],"BODY":"METHOD1OUTPUT1 = METHOD1INPUT1 +' &&
+  ' METHOD1INPUT2.METHOD1OUTPUT2 = METHOD1INPUT1 * METHOD1INPUT2."},{"METHODNAME":"METHOD2","INPUTDATA"' &&
+  ':[{"DATATYPE":"CHAR36","DATANAME":"METHOD2INPUT1","DATAVALUE":"1"},{"DATATYPE":"CHAR36","DATANAME":"METHOD2INPUT2","DATAVALUE":"2"}],"OUTPUTDATA"' &&
+   ':[{"DATATYPE":"CHAR36","DATANAME":"METHOD2OUTPUT1"}],"BODY":"METHOD2OUTPUT1 = METHOD2INPUT1 && METHOD2INPUT2."}]}'.
+
+CALL TRANSFORMATION id SOURCE XML inputstring RESULT methods = lt_classmethod.
+
+
+codestr[] = VALUE #( ( `PROGRAM.` ) ( `CLASS MAIN DEFINITION.` ) ( `  PUBLIC SECTION.` ) ( `    CLASS-METHODS: ` ) ).
+
+* 动态定义所有类方法
+CLEAR codestr.
+LOOP AT lt_classmethod ASSIGNING FIELD-SYMBOL(<fs_classmethod>).
+  APPEND `                     ` &&  <fs_classmethod>-methodname    TO codestr.
+  IF <fs_classmethod>-inputdata IS NOT INITIAL.
+    APPEND  `      IMPORTING `    TO codestr.
+    LOOP AT <fs_classmethod>-inputdata ASSIGNING FIELD-SYMBOL(<fs_transtru>).
+      APPEND `                ` &&  <fs_transtru>-dataname && ` TYPE `  && <fs_transtru>-datatype TO codestr.
+    ENDLOOP.
+  ENDIF.
+  IF <fs_classmethod>-inputdata IS NOT INITIAL.
+    APPEND  `      EXPORTING `    TO codestr.
+    LOOP AT <fs_classmethod>-outputdata ASSIGNING <fs_transtru>.
+      APPEND `                ` &&  <fs_transtru>-dataname && ` TYPE `  && <fs_transtru>-datatype TO codestr.
+    ENDLOOP.
+  ENDIF.
+  APPEND `               ,`  TO codestr.
+ENDLOOP.
+codestr[ lines( codestr ) ] = '          .'.
+codestr[] = VALUE #( BASE codestr[] ( `ENDCLASS.` ) ( `CLASS MAIN IMPLEMENTATION.` ) ).
+
+LOOP AT lt_classmethod ASSIGNING <fs_classmethod>.
+  CLEAR codestr.
+  APPEND `  METHOD ` && <fs_classmethod>-methodname && `.` TO codestr.
+  SPLIT <fs_classmethod>-body AT '.' INTO TABLE bodystr.
+  LOOP AT bodystr.
+    IF bodystr IS INITIAL.
+      CONTINUE.
+    ENDIF.
+    CONCATENATE bodystr '.' INTO codestr.
+    APPEND codestr.
+    CLEAR codestr.
+  ENDLOOP.
+  APPEND `  ENDMETHOD.` TO codestr.
+ENDLOOP.
+APPEND   `ENDCLASS.`  TO codestr.
+
+GENERATE SUBROUTINE POOL codestr[] NAME prog.
+CONCATENATE `\PROGRAM=` prog `\CLASS=MAIN` INTO DATA(class).
+
+"动态调用
+LOOP AT lt_classmethod ASSIGNING <fs_classmethod>.
+  CLEAR: ptab,etab.
+  IF <fs_classmethod>-inputdata IS NOT INITIAL.
+    LOOP AT <fs_classmethod>-inputdata ASSIGNING <fs_transtru>.
+      ptab = VALUE #( BASE ptab ( name = <fs_transtru>-dataname  kind = cl_abap_objectdescr=>exporting value = REF #( <fs_classmethod>-inputdata[ sy-tabix ]-datavalue ) ) ).
+    ENDLOOP.
+  ENDIF.
+
+  "动态调用类方法
+  IF <fs_classmethod>-outputdata IS NOT INITIAL.
+    LOOP AT <fs_classmethod>-outputdata ASSIGNING <fs_transtru>.
+      ptab = VALUE #( BASE ptab ( name = <fs_transtru>-dataname  kind = cl_abap_objectdescr=>importing value = REF #( <fs_classmethod>-outputdata[ sy-tabix ]-datavalue ) ) ).
+    ENDLOOP.
+  ENDIF.
+  CALL METHOD (class)=>(<fs_classmethod>-methodname)
+    PARAMETER-TABLE ptab "参数
+    EXCEPTION-TABLE etab. "异常
+  IF etab IS INITIAL.
+    LOOP AT <fs_classmethod>-outputdata ASSIGNING <fs_transtru>.
+      ASSIGN ptab[ name = <fs_transtru>-dataname kind = cl_abap_objectdescr=>importing ]-value TO FIELD-SYMBOL(<fs_test>).
+      ASSIGN <fs_test>->* TO FIELD-SYMBOL(<fs_testdata>) .
+      <fs_transtru>-datavalue = <fs_testdata>.
+      CONDENSE <fs_transtru>-datavalue.
+    ENDLOOP.
+    outputstr = /ui2/cl_json=>serialize( data = lt_classmethod compress = '' pretty_name = /ui2/cl_json=>pretty_mode-none ).
+  ELSE.
+    outputstr = /ui2/cl_json=>serialize( data = etab compress = '' pretty_name = /ui2/cl_json=>pretty_mode-none ).
+  ENDIF.
+  cl_demo_output=>display_json( outputstr ).
+  CLEAR outputstr.
+ENDLOOP.
